@@ -61,16 +61,15 @@ typedef void (*ConnectionStateChangedCallbackFunc)(
 	int connectionState
 	);
 
-typedef void (*LoggingFunc)(const char*);
-LoggingFunc g_fnLoggingFunc = nullptr;
-LoggingFunc g_fnLobbyChatOutput = nullptr;
+extern LoggingFunc g_fnLoggingFunc;
+extern LoggingFunc g_fnLobbyChatOutput;
 
-EOS_HPlatform g_EOSPlatformHandle = nullptr;
+extern EOS_HPlatform g_EOSPlatformHandle;
 
 typedef void (*LoginCallback)(bool bSuccess);
 
 // Thread synchronization for global state
-std::recursive_mutex g_StateMutex;
+extern std::recursive_mutex g_StateMutex;
 
 // ------------------------------------------------------------
 // Enums (mirroring plugin.cpp)
@@ -120,17 +119,17 @@ PLUGIN_API void RefreshToken(const char* gameToken, LoginCallback cb);
 // ------------------------------------------------------------
 // Vars
 // ------------------------------------------------------------
-EOS_ProductUserId g_EOSUserID = nullptr;
-uint32_t g_goUserID = 0;
+extern EOS_ProductUserId g_EOSUserID;
+extern uint32_t g_goUserID;
 
-ACIntegrityViolationCallbackFunc g_fnAnticheatIntegrityViolationOccurredCallback = nullptr;
-ACPlayerActionRequiredCallbackFunc g_fnAnticheatActionCallback = nullptr;
-SendMessageViaTransportFunc g_fnSendMessageViaTransport = nullptr;
-bool g_bEventsHooked = false;
-bool g_bSessionActive = false;
-bool g_bLoginInFlight = false;
-bool g_bShuttingDown = false;
-uint64_t g_SessionGeneration = 0;
+extern ACIntegrityViolationCallbackFunc g_fnAnticheatIntegrityViolationOccurredCallback;
+extern ACPlayerActionRequiredCallbackFunc g_fnAnticheatActionCallback;
+extern SendMessageViaTransportFunc g_fnSendMessageViaTransport;
+extern bool g_bEventsHooked;
+extern bool g_bSessionActive;
+extern bool g_bLoginInFlight;
+extern bool g_bShuttingDown;
+extern uint64_t g_SessionGeneration;
 
 // ------------------------------------------------------------
 // Enums

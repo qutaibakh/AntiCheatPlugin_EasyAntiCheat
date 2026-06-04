@@ -6,7 +6,21 @@ EOS_NotificationId g_NotifyMessageToPeerId = 0;
 EOS_NotificationId g_NotifyPeerAuthStatusChangedId = 0;
 EOS_NotificationId g_NotifyPeerActionRequiredId = 0;
 
-typedef void (*LoginCallback)(bool bSuccess);
+LoggingFunc g_fnLoggingFunc = nullptr;
+LoggingFunc g_fnLobbyChatOutput = nullptr;
+EOS_HPlatform g_EOSPlatformHandle = nullptr;
+std::recursive_mutex g_StateMutex;
+EOS_ProductUserId g_EOSUserID = nullptr;
+uint32_t g_goUserID = 0;
+ACIntegrityViolationCallbackFunc g_fnAnticheatIntegrityViolationOccurredCallback = nullptr;
+ACPlayerActionRequiredCallbackFunc g_fnAnticheatActionCallback = nullptr;
+SendMessageViaTransportFunc g_fnSendMessageViaTransport = nullptr;
+bool g_bEventsHooked = false;
+bool g_bSessionActive = false;
+bool g_bLoginInFlight = false;
+bool g_bShuttingDown = false;
+uint64_t g_SessionGeneration = 0;
+
 LoginCallback g_LoginCallback = nullptr;
 
 static DWORD GetCallbackThreadId()
@@ -395,7 +409,9 @@ int Initialize()
         PlatformOptions.bIsServer = EOS_FALSE;
         PlatformOptions.OverrideCountryCode = nullptr;
         PlatformOptions.OverrideLocaleCode = nullptr;
-        PlatformOptions.Flags = EOS_PF_WINDOWS_ENABLE_OVERLAY_D3D9 | EOS_PF_WINDOWS_ENABLE_OVERLAY_D3D10;
+        // Generals Zero Hour is a D3D8 title. Avoid enabling EOS overlay hooks for
+        // unrelated D3D versions in the same process.
+        PlatformOptions.Flags = 0;
         PlatformOptions.CacheDirectory = strCachePath.c_str();
 
         PlatformOptions.ProductId = "TODO";
@@ -483,6 +499,8 @@ int Initialize()
         }
 
         g_EOSPlatformHandle = EOS_Platform_Create(&PlatformOptions);
+        EOS_IntegratedPlatformOptionsContainer_Release(PlatformOptions.IntegratedPlatformOptionsContainerHandle);
+        PlatformOptions.IntegratedPlatformOptionsContainerHandle = nullptr;
         
         if (g_EOSPlatformHandle == nullptr)
         {
@@ -821,7 +839,8 @@ void BeginSession()
 	}
 
 	++g_SessionGeneration;
-	HookupEvents();
+	const uint64_t sessionGeneration = g_SessionGeneration;
+	UnhookEventsLocked(acHandle);
 
 	EOS_AntiCheatClient_BeginSessionOptions beginSessionOpts = {};
 	beginSessionOpts.ApiVersion = EOS_ANTICHEATCLIENT_BEGINSESSION_API_LATEST;
@@ -836,8 +855,9 @@ void BeginSession()
 	else
 	{
 		g_bSessionActive = true;
+		HookupEvents();
 		PluginLog("[EAC] BeginSession succeeded generation=%llu",
-			(unsigned long long)g_SessionGeneration);
+			(unsigned long long)sessionGeneration);
 	}
 }
 
@@ -913,9 +933,17 @@ bool RegisterPlayer(const char* szMiddlewareUserID, uint32_t goUserID)
 		return false;
 	}
 
-	if (EOS_ProductUserId_FromString(szMiddlewareUserID) == g_EOSUserID)
+	EOS_ProductUserId peerProductUserId = EOS_ProductUserId_FromString(szMiddlewareUserID);
+	if (peerProductUserId == nullptr)
+	{
+		PluginLog("[EAC] RegisterPlayer: Invalid EOS product user ID for %s/%u", szMiddlewareUserID, goUserID);
+		return false;
+	}
+
+	if (peerProductUserId == g_EOSUserID)
 	{
 		g_goUserID = goUserID;
+		PluginLog("[EAC] RegisterPlayer: Registered local player %s - %u", szMiddlewareUserID, goUserID);
 		return true;
 	}
 
@@ -927,18 +955,10 @@ bool RegisterPlayer(const char* szMiddlewareUserID, uint32_t goUserID)
 	opts.AuthenticationTimeout = EOS_ANTICHEATCLIENT_REGISTERPEER_MAX_AUTHENTICATIONTIMEOUT;
 	opts.AccountId_DEPRECATED = nullptr;
 	opts.IpAddress = nullptr;
-	opts.PeerProductUserId = EOS_ProductUserId_FromString(szMiddlewareUserID);
+	opts.PeerProductUserId = peerProductUserId;
 	EOS_EResult res = EOS_AntiCheatClient_RegisterPeer(acHandle, &opts);
 
-	if (opts.PeerProductUserId == g_EOSUserID)
-	{
-		PluginLog("[EAC] RegisterPlayer: Registering local player %s - %d!", szMiddlewareUserID, goUserID);
-		g_goUserID = goUserID;
-	}
-	else
-	{
-		PluginLog("[EAC] RegisterPlayer: Registering remote player %s - %d!", szMiddlewareUserID, goUserID);
-	}
+	PluginLog("[EAC] RegisterPlayer: Registering remote player %s - %u!", szMiddlewareUserID, goUserID);
 	
 	if (res != EOS_EResult::EOS_Success)
 	{
@@ -1203,8 +1223,6 @@ void Login(const char* szGameToken, LoginCallback cb)
 		PluginLog("[EAC] Connect EOS: (null token)");
 	}
 
-	PluginLog("[EAC] A");
-	PluginLog("[EAC] B");
 	if (g_EOSPlatformHandle == nullptr)
 	{
 		PluginLog("[EAC] MIDDLEWARE ERROR: Platform not initialized!");
@@ -1216,7 +1234,6 @@ void Login(const char* szGameToken, LoginCallback cb)
 		}
 		return;
 	}
-	PluginLog("[EAC] C");
 	EOS_HConnect ConnectHandle = EOS_Platform_GetConnectInterface(g_EOSPlatformHandle);
 	
 	if (ConnectHandle == nullptr)
@@ -1245,11 +1262,9 @@ void Login(const char* szGameToken, LoginCallback cb)
 	userLoginInfo.DisplayName = nullptr; // not set for oauth, retrieved from token instead
 	userLoginInfo.NsaIdToken = nullptr;
 	Options.UserLoginInfo = &userLoginInfo;
-	PluginLog("[EAC] D");
 	// TODO: Start a timeout
 	EOS_Connect_Login(ConnectHandle, &Options, reinterpret_cast<void*>(static_cast<uintptr_t>(loginGeneration)), [](const EOS_Connect_LoginCallbackInfo* Data)
 		{
-			PluginLog("[EAC] done");
 			if (Data == nullptr)
 			{
 				return;
@@ -1269,19 +1284,15 @@ void Login(const char* szGameToken, LoginCallback cb)
 				}
 			}
 
-			PluginLog("[EAC] done2");
-
 			// TODO: Clear timeout
 
 			if (Data->ResultCode == EOS_EResult::EOS_Success)
 			{
-				PluginLog("[EAC] done 2a");
 				{
 					std::lock_guard<std::recursive_mutex> lock(g_StateMutex);
 					g_EOSUserID = Data->LocalUserId;
 				}
 
-				PluginLog("[EAC] done 3");
 				char szBuffer[EOS_PRODUCTUSERID_MAX_LENGTH + 1] = { 0 };
 				int32_t outLen = sizeof(szBuffer);
 				EOS_ProductUserId_ToString(Data->LocalUserId, szBuffer, &outLen);
@@ -1306,8 +1317,6 @@ void Login(const char* szGameToken, LoginCallback cb)
 			}
 			else if (Data->ResultCode == EOS_EResult::EOS_InvalidUser)
 			{
-				PluginLog("[EAC] done 4");
-			
 				EOS_HConnect ConnectHandle = nullptr;
 				EOS_ContinuanceToken ContinuanceToken = nullptr;
 			
@@ -1409,7 +1418,6 @@ void Login(const char* szGameToken, LoginCallback cb)
 			}
 			else
 			{
-				PluginLog("[EAC] done 5");
 				PluginLog("[EAC] Account Link Failed");
 			
 				LoginCallback localCallback = nullptr;
